@@ -117,7 +117,7 @@ class Worker:
 
         noise_indices, returns, sign_returns, lengths = [], [], [], []
         eval_returns, eval_lengths = [], []
-        #eval_net_worth, net_worth = [], []
+        eval_net_worth, net_worth = [], []
 
         # Perform some rollouts with noise.
         task_tstart = time.time()
@@ -127,11 +127,11 @@ class Worker:
             if np.random.uniform() < self.config["eval_prob"]:
                 # Do an evaluation run with no perturbation.
                 self.policy.set_weights(params)
-                rewards, length = self.rollout(timestep_limit, add_noise=False)
+                rewards, length, tt_info = self.rollout(timestep_limit, add_noise=False)
                 #eval_returns.append(rewards.sum())
                 eval_returns.append(rewards.mean())
                 eval_lengths.append(length)
-                #eval_net_worth.append(tt_info["portfolio"].performance.net_worth.iloc[-1:])
+                eval_net_worth.append(tt_info["portfolio"].performance.net_worth.iloc[-1:])
             else:
                 # Do a regular run with parameter perturbations.
                 noise_index = self.noise.sample_index(self.policy.num_params)
@@ -289,7 +289,7 @@ class ESTrainer(Trainer):
             "update_ratio": update_ratio,
             "episodes_this_iter": noisy_lengths.size,
             "episodes_so_far": self.episodes_so_far,
-            #"Eval Net Worth": eval_net_worth,
+            "Eval Net Worth": eval_net_worth,
             #"Net Worth": net_worth,
         }
 
