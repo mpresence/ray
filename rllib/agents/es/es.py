@@ -8,14 +8,12 @@ import time
 
 import ray
 from ray.rllib.agents import Trainer, with_common_config
-
-from ray.rllib.agents.es import optimizers
-from ray.rllib.agents.es import policies
-from ray.rllib.agents.es import utils
+from ray.rllib.agents.es import optimizers, policies, utils
+from ray.rllib.env.env_context import EnvContext
 from ray.rllib.policy.sample_batch import DEFAULT_POLICY_ID
+from ray.rllib.utils import FilterManager
 from ray.rllib.utils.annotations import override
 from ray.rllib.utils.memory import ray_get_and_free
-from ray.rllib.utils import FilterManager
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +68,15 @@ class Worker:
                  policy_params,
                  env_creator,
                  noise,
+                 worker_index,
                  min_task_runtime=0.2):
         self.min_task_runtime = min_task_runtime
         self.config = config
         self.policy_params = policy_params
         self.noise = SharedNoiseTable(noise)
 
-        self.env = env_creator(config["env_config"])
+        env_context = EnvContext(config["env_config"] or {}, worker_index)
+        self.env = env_creator(env_context)
         from ray.rllib import models
         self.preprocessor = models.ModelCatalog.get_preprocessor(
             self.env, config["model"])
@@ -104,12 +104,12 @@ class Worker:
         return return_filters
 
     def rollout(self, timestep_limit, add_noise=True):
-        rollout_rewards, rollout_length = policies.rollout(
+        rollout_rewards, rollout_fragment_length = policies.rollout(
             self.policy,
             self.env,
             timestep_limit=timestep_limit,
             add_noise=add_noise)
-        return rollout_rewards, rollout_length
+        return rollout_rewards, rollout_fragment_length
 
     def do_rollouts(self, params, timestep_limit=None):
         # Set the network weights.
@@ -117,6 +117,7 @@ class Worker:
 
         noise_indices, returns, sign_returns, lengths = [], [], [], []
         eval_returns, eval_lengths = [], []
+        #eval_net_worth, net_worth = [], []
 
         # Perform some rollouts with noise.
         task_tstart = time.time()
@@ -127,8 +128,10 @@ class Worker:
                 # Do an evaluation run with no perturbation.
                 self.policy.set_weights(params)
                 rewards, length = self.rollout(timestep_limit, add_noise=False)
-                eval_returns.append(rewards.sum())
+                #eval_returns.append(rewards.sum())
+                eval_returns.append(rewards.mean())
                 eval_lengths.append(length)
+                #eval_net_worth.append(tt_info["portfolio"].performance.net_worth.iloc[-1:])
             else:
                 # Do a regular run with parameter perturbations.
                 noise_index = self.noise.sample_index(self.policy.num_params)
@@ -140,16 +143,22 @@ class Worker:
                 # different actors letting us update twice as frequently.
                 self.policy.set_weights(params + perturbation)
                 rewards_pos, lengths_pos = self.rollout(timestep_limit)
+                rewards_pos = np.nan_to_num(rewards_pos)
+                lengths_pos = np.nan_to_num(lengths_pos)
+
 
                 self.policy.set_weights(params - perturbation)
                 rewards_neg, lengths_neg = self.rollout(timestep_limit)
+                rewards_neg = np.nan_to_num(rewards_neg)
+                lengths_neg = np.nan_to_num(lengths_neg)
 
                 noise_indices.append(noise_index)
-                returns.append([rewards_pos.sum(), rewards_neg.sum()])
+                returns.append([rewards_pos.mean(), rewards_neg.mean()])
                 sign_returns.append(
-                    [np.sign(rewards_pos).sum(),
-                     np.sign(rewards_neg).sum()])
+                    [np.sign(rewards_pos).mean(),
+                     np.sign(rewards_neg).mean()])
                 lengths.append([lengths_pos, lengths_neg])
+                #net_worth.append(tt_info["portfolio"].performance.net_worth.iloc[-1:])
 
         return Result(
             noise_indices=noise_indices,
@@ -175,7 +184,8 @@ class ESTrainer(Trainer):
 
         policy_params = {"action_noise_std": 0.01}
 
-        env = env_creator(config["env_config"])
+        env_context = EnvContext(config["env_config"] or {}, worker_index=0)
+        env = env_creator(env_context)
         from ray.rllib import models
         preprocessor = models.ModelCatalog.get_preprocessor(env)
 
@@ -194,8 +204,8 @@ class ESTrainer(Trainer):
         # Create the actors.
         logger.info("Creating actors.")
         self._workers = [
-            Worker.remote(config, policy_params, env_creator, noise_id)
-            for _ in range(config["num_workers"])
+            Worker.remote(config, policy_params, env_creator, noise_id,
+                          idx + 1) for idx in range(config["num_workers"])
         ]
 
         self.episodes_so_far = 0
@@ -279,12 +289,14 @@ class ESTrainer(Trainer):
             "update_ratio": update_ratio,
             "episodes_this_iter": noisy_lengths.size,
             "episodes_so_far": self.episodes_so_far,
+            #"Eval Net Worth": eval_net_worth,
+            #"Net Worth": net_worth,
         }
 
         reward_mean = np.mean(self.reward_list[-self.report_length:])
         result = dict(
-            episode_reward_mean=reward_mean,
-            episode_len_mean=eval_lengths.mean(),
+            episode_reward_mean=np.nan_to_num(reward_mean),
+            episode_len_mean=np.nan_to_num(eval_lengths.mean()),
             timesteps_this_iter=noisy_lengths.sum(),
             info=info)
 
