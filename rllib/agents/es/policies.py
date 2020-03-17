@@ -28,13 +28,13 @@ def rollout(policy, env, timestep_limit=None, add_noise=False):
     observation = env.reset()
     for _ in range(timestep_limit or 999999):
         ac = policy.compute(observation, add_noise=add_noise)[0]
-        observation, rew, done, _ = env.step(ac)
+        observation, rew, done, info = env.step(ac)
         rews.append(rew)
         t += 1
         if done:
             break
     rews = np.array(rews, dtype=np.float32)
-    return rews, t
+    return rews, t, info
 
 
 class GenericPolicy:
